@@ -253,7 +253,6 @@ once via AWS Service Quotas for a new account.
 - [x] Early stopping, hidden layer and dropout, with learning-rate tuning (data augmentation not done)
 - [x] Automatic hyperparameter tuning (SageMaker `HyperparameterTuner`)
 - [x] Deploy a real-time inference **endpoint** + test client, evaluated on the held-out test set
-- [ ] Model monitoring and data-drift detection
 
 ---
 
