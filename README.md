@@ -28,6 +28,8 @@ flowchart LR
     A["01_download_data.py<br/>Kaggle API"] --> B["02_prepare_data.py<br/>split 70/15/15"]
     T["03_train.py"]
     U["04_tune.py"]
+    D["05_deploy.py"]
+    E["06_evaluate.py<br/>metrics on the test set"]
   end
   subgraph aws["AWS cloud"]
     S[("S3<br/>cats-vs-dogs/data")]
@@ -35,6 +37,7 @@ flowchart LR
     H["SageMaker tuning job<br/>15 Bayesian trials"]
     M["MLflow App"]
     O[("S3<br/>model.tar.gz")]
+    P["Real-time endpoint<br/>ml.m5.xlarge, TF Serving"]
   end
   B -->|aws s3 sync| S
   S --> J
@@ -43,6 +46,9 @@ flowchart LR
   H -->|each trial is a training job| J
   J -->|params + metrics| M
   J --> O
+  D -->|deploy| P
+  O --> P
+  E -->|JPEG test images| P
 ```
 
 - **`config.py`** — central config: region, IAM execution-role ARN, MLflow App ARN,
@@ -60,11 +66,20 @@ flowchart LR
 - **`src/train.py`** — the *training script* that actually runs inside the cloud
   container. An **end-to-end model**: raw pixels → VGG16 preprocessing → frozen
   VGG16 convolutional base → flatten → feature-wise standardisation → classifier
-  head → sigmoid probability. Baking the preprocessing into the model means the
-  future endpoint accepts raw images. The standardisation statistics are computed on
+  head → sigmoid probability. The standardisation statistics are computed on
   the **training set only** (no leakage from validation/test) and stored inside the
   model, so training and serving can never drift apart. Seeds are fixed (including
   the dataset shuffle) and GPU ops forced deterministic, so runs are reproducible.
+- **`src/export.py`** — saves the trained model for TF Serving with a JPEG entry point:
+  raw JPEG bytes → decode → bilinear resize to 224×224 → the model above. Decode and
+  resize use the same TensorFlow ops as the training data loader, so serving matches
+  training and the endpoint needs no inference script.
+- **`05_deploy.py`** — *launcher* that deploys the model to a real-time endpoint
+  (TensorFlow Serving container, TF 2.14, one CPU instance).
+- **`06_evaluate.py`** — test client: reads the held-out test JPEGs from S3, sends them
+  to the endpoint in batches, reports accuracy, precision, recall, F1 and the confusion
+  matrix, then **deletes the endpoint** (in a `finally` block, so it is removed even if
+  evaluation fails).
 - **`src/requirements.txt`** — pinned MLflow client + `sagemaker-mlflow` plugin,
   installed into the training container at startup.
 
@@ -159,6 +174,36 @@ fixed. Every trial also logs its own MLflow run.
   `03_train.py`, matches the tuning trial to every digit (best epoch, val loss, train
   loss, train and validation accuracy).
 
+## Deployment and test-set evaluation
+
+The tuned model is served on a real-time endpoint (`ml.m5.xlarge`, CPU: one-off
+evaluation, no production traffic, so a GPU would cost more for no benefit). Clients
+send JPEG images as base64 in TF Serving's standard JSON format
+(`{"instances": [{"b64": ...}]}`); decoding and resizing happen inside the model.
+
+Held-out test set, 3,000 images, used once (dog = positive class):
+
+| Metric | Value |
+|---|---|
+| Accuracy | 98.17% |
+| Precision | 98.78% |
+| Recall | 97.53% |
+| F1-score | 98.15% |
+
+| | Predicted cat | Predicted dog |
+|---|---|---|
+| **True cat** | 1482 | 18 |
+| **True dog** | 37 | 1463 |
+
+- Test accuracy (98.17%) matches validation accuracy (98.13%): the optimism from picking
+  the best tuning trial on the validation set is small, and the result is consistent
+  with the serving-side decode and resize matching the training pipeline.
+- An earlier notebook version of this classifier (frozen VGG16 features, Dense(10) head)
+  reached F1 98.29% on its own test split. The splits differ, so the 4-image difference
+  is within noise: the frozen-feature approach plateaus at about 98%.
+- Errors are asymmetric: dogs misclassified as cats (37) outnumber cats as dogs (18).
+- The endpoint ran for about 40 minutes in total and was deleted by the evaluation script.
+
 ## Lessons learned
 
 - A tuning job passed an extra `--model_dir` argument to the training script, even with
@@ -167,6 +212,10 @@ fixed. Every trial also logs its own MLflow run.
   the script's own `--model-dir` (which defaults to `SM_MODEL_DIR`).
   `parse_known_args()` was avoided on purpose: unknown arguments should still fail
   loudly, otherwise a misspelled hyperparameter name would silently tune nothing.
+- Training and serving run in different containers, so preprocessing must be identical
+  on both sides. Decoding and resizing in Python at the endpoint would need TensorFlow
+  installed there, or would use a different resize algorithm (Pillow). Exporting them
+  inside the SavedModel keeps one definition, and TF Serving runs it without Python.
 
 ## How to run
 
@@ -190,6 +239,8 @@ python 02_prepare_data.py
 aws s3 sync data/prepared s3://<your-bucket>/cats-vs-dogs/data
 python 03_train.py
 python 04_tune.py
+python 05_deploy.py
+python 06_evaluate.py
 ```
 
 A GPU training quota (`ml.g4dn.xlarge for training job usage`) must be requested
@@ -201,7 +252,7 @@ once via AWS Service Quotas for a new account.
 - [x] Feature-wise standardisation of the VGG16 features
 - [x] Early stopping, hidden layer and dropout, with learning-rate tuning (data augmentation not done)
 - [x] Automatic hyperparameter tuning (SageMaker `HyperparameterTuner`)
-- [ ] Deploy a real-time inference **endpoint** + test client, evaluated on the held-out test set
+- [x] Deploy a real-time inference **endpoint** + test client, evaluated on the held-out test set
 - [ ] Model monitoring and data-drift detection
 
 ---
