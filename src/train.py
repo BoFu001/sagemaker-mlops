@@ -11,6 +11,8 @@ from tensorflow.keras import layers, Model
 from tensorflow.keras.applications import VGG16
 from tensorflow.keras.applications.vgg16 import preprocess_input
 
+from export import save_for_serving
+
 IMG_SIZE = 224
 CLASS_NAMES = ["cats", "dogs"]   # cats=0, dogs=1
 
@@ -101,8 +103,8 @@ def main():
         })
         print(f"best_val_loss={early_stop.best:.6f}")              # parsed from the log by the SageMaker tuner
 
-    # Save as a TF SavedModel (under version dir "1", for later deployment)
-    model.save(os.path.join(args.model_dir, "1"))
+    # Save as a TF SavedModel (under version dir "1", for TF Serving); its entry point takes JPEG bytes
+    save_for_serving(model, os.path.join(args.model_dir, "1"), IMG_SIZE)
     print("Model saved.")
 
 
